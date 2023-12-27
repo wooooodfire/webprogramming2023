@@ -5,16 +5,141 @@ const server = http.createServer(app);
 const { Server } = require('socket.io');
 const io = new Server(server);
 const port = 4500;
+const auth = require('./auth');
+const flash = require('connect-flash');
+
+// **** session ****
+const session = require('express-session');
+const MongoStore = require('connect-mongo');
+
+const oneDay = 1000 * 60 * 10;
+
+const sessionMiddleware = session({
+	secret: 'thisismysecrctekeyabc123',
+	saveUninitialized: true,
+	cookie: { maxAge: oneDay },
+	store: MongoStore.create({ mongoUrl: 'mongodb://localhost/webcourse2023' }),
+	resave: false,
+});
+
+//session middleware
+app.use(sessionMiddleware);
+
+// **** mongoose ****
+
+const mongoose = require('mongoose');
+mongoose.connect('mongodb://localhost/webcourse2023', { useNewUrlParser: true });
+
+const db = mongoose.connection;
+
+db.once('open', () => {
+	console.log('mongodb 已連線');
+});
+
+db.on('error', () => {
+	console.log('mongodb 連線錯誤');
+});
+
+const accountSchema = mongoose.Schema({
+	username: String,
+	password: String,
+});
+
+// Compile model from schema
+const AccountModel = mongoose.model('AccountModel', accountSchema);
+
+const QuizModel = mongoose.model(
+	'quiz',
+	new mongoose.Schema({
+		word: String,
+		category: String,
+		difficulty: Number,
+	})
+);
+
+// **** express ****
 
 app.set('view engine', 'ejs');
 app.engine('html', require('ejs').renderFile);
 app.use(express.static('public'));
+app.use(express.urlencoded());
+app.use(flash());
 
-app.get('/', (req, res) => {
-	res.render('index.html');
+// **** router ****
+
+app.get('/', auth.isLoggin, (req, res) => {
+	console.log(`username: ${!req.session.username} .`);
+	res.render('home', { expressFlash: req.flash('failed') });
+});
+
+app.post('/signup', (req, res) => {
+	let { username, password } = req.body;
+	if (username && password) {
+		// Create an instance of model AccountModel
+		let account_instance = new AccountModel({ username, password });
+
+		// Save the new model instance, passing a callback
+		account_instance.save();
+		console.log('Account Saved!');
+		req.flash('failed', '成功創建帳號');
+	}
+	res.redirect('/');
+});
+
+app.post('/signin', async (req, res) => {
+	let { username, password } = req.body;
+	let result;
+	if (username && password) {
+		// 執行查詢
+		try {
+			result = await db.collection('accountmodels').find({ username }).toArray();
+			if (result.length === 0) {
+				req.flash('failed', '帳號密碼錯誤');
+				return res.redirect('/');
+			} else if (result[0]['password'] !== password) {
+				req.flash('failed', '帳號密碼錯誤');
+				return res.redirect('/');
+			} else {
+				req.session.username = username;
+				req.session.id = result[0]._id;
+				return res.redirect('/play');
+			}
+		} catch {
+			return res.status('200').redirect('/');
+		}
+	} else {
+		req.flash('failed', '不明錯誤');
+		return res.redirect('/');
+	}
+	res.redirect('/');
+});
+
+app.get('/play', auth.isLoggingPlay, (req, res) => {
+	console.log(`in play page: ${req.session.username}`);
+	res.render('play.ejs', { username: req.session.username });
+});
+
+app.get('/logout', (req, res) => {
+	req.session.destroy();
+	res.redirect('/');
+});
+
+app.get('/test', async (req, res) => {
+	// 獲取文檔總數
+	const count = await QuizModel.countDocuments();
+	console.log(count)
+	// 生成隨機索引
+	const randomIndex = Math.floor(Math.random() * count);
+
+	// 查詢並返回隨機文檔
+	const randomDocument = await QuizModel.findOne().skip(randomIndex);
+
+	res.send(randomDocument);
 });
 
 let users = {};
+
+io.engine.use(sessionMiddleware);
 
 io.on('connection', (socket) => {
 	console.log('a user connected');
@@ -24,60 +149,43 @@ io.on('connection', (socket) => {
 	var isHost = false;
 
 	// 登入
-	socket.on('login', (username, roomNum) => {
+	socket.on('login', (roomNum) => {
 		if (!users[roomNum]) {
 			users[roomNum] = { name: [], host: '', hostID: '', ans: '', start: false };
 		}
-		const sameUser = users[roomNum].name.find((user) => {
-			return user === username;
+
+		socket.nickname = socket.request.session.username;
+		myname = socket.request.session.username;
+		myroom = roomNum;
+		socket.join(roomNum);
+		console.log('-------------Someone Join US! --------------');
+		console.log(`${socket.nickname}已加入${[...socket.rooms][1]}房間`);
+
+		// 只發事件給這個使用者
+		socket.emit('connectionSuccess', {
+			success: true,
+			message: '歡迎加入！連線成功',
+			myname,
+			roomNum,
 		});
 
-		if (sameUser || users[roomNum].host === username) {
-			socket.emit('connectionFail', {
-				success: false,
-				message: '使用者名稱重複',
-			});
-		}
-			else {
-			socket.nickname = username;
-			myname = username;
-			myroom = roomNum;
-			socket.join(roomNum);
-			console.log('-------------Someone Join US! --------------');
-			console.log(`${socket.nickname}已加入${[...socket.rooms][1]}房間`);
+		io.to(myroom).emit('chat message', `已經加入房間`, socket.nickname);
 
-			// 只發事件給這個使用者
-			socket.emit('connectionSuccess', {
-				success: true,
-				message: '歡迎加入！連線成功',
-				username,
-				roomNum,
-			});
+		// 給除了這個使用者外的其他人
+		socket.broadcast.emit('connectionSuccessOthers', {
+			success: true,
+			message: `歡迎使用者 ${myname} 連線成功`,
+		});
 
-			io.to(myroom).emit('chat message', `已經加入房間`, socket.nickname);
-
-			// 給除了這個使用者外的其他人
-			socket.broadcast.emit('connectionSuccessOthers', {
-				success: true,
-				message: `歡迎使用者 ${username} 連線成功`,
-			});
-
-			// 發事件給所有人，包括這個使用者
-			// io.emit('connectionSuccess', {
-			// 	success: true,
-			// 	message: '即刻起免費使用聊天室直到～永遠',
-			// });
-
-			users[roomNum].name.push(username);
-			console.log('現在所有的users');
-			console.log(users);
-			console.log('--------------------------------------------');
-			console.log('');
-		}
+		users[roomNum].name.push(myname);
+		console.log('現在所有的users');
+		console.log(users);
+		console.log('--------------------------------------------');
+		console.log('');
 	});
 
 	// host login
-	socket.on('hostLogin', (username, roomNum) => {
+	socket.on('hostLogin', (roomNum) => {
 		if (!users[roomNum]) {
 			users[roomNum] = { name: [], host: '', hostID: '', ans: '', start: false };
 		}
@@ -89,12 +197,12 @@ io.on('connection', (socket) => {
 				message: '已經有Host了',
 			});
 		} else {
-			socket.nickname = username;
-			myname = username;
+			socket.nickname = socket.request.session.username;
+			myname = socket.request.session.username;
 			myroom = roomNum;
 
 			isHost = true;
-			console.log(`我是Host嗎${isHost}`)
+			console.log(`我是Host嗎${isHost}`);
 			socket.join(roomNum);
 			console.log('-------------Someone Join US! --------------');
 			console.log(`Host: ${socket.nickname}已加入${[...socket.rooms][1]}房間`);
@@ -103,36 +211,25 @@ io.on('connection', (socket) => {
 			socket.emit('hostConnectionSuccess', {
 				success: true,
 				message: '歡迎加入！連線成功',
-				username,
+				myname,
 				roomNum,
 			});
 
 			// 給除了這個使用者外的其他人
 			io.to(myroom).emit('hostConnectionSuccessOthers', {
 				success: true,
-				message: `您們的主持人${username}`,
-				username,
+				message: `您們的主持人${myname}`,
+				myname,
 			});
 			io.to(myroom).emit('chat message', `Host已經加入房間`, socket.nickname);
 
-			// 發事件給所有人，包括這個使用者
-			// io.emit('connectionSuccess', {
-			// 	success: true,
-			// 	message: '即刻起免費使用聊天室直到～永遠',
-			// });
-
-			users[roomNum].host = username;
+			users[roomNum].host = myname;
 			users[roomNum].hostID = socket.id;
 			console.log('現在所有的users');
 			console.log(users);
 			console.log('--------------------------------------------');
 			console.log('');
 		}
-	});
-
-	socket.on('room number', (msg) => {
-		socket.join(msg);
-		console.log(`${socket.nickname}已加入${[...socket.rooms][1]}房間`);
 	});
 
 	socket.on('disconnect', () => {
@@ -160,35 +257,6 @@ io.on('connection', (socket) => {
 		console.log('');
 	});
 
-	socket.on('send-nickname', function (nickname) {
-		socket.nickname = nickname;
-		console.log(socket.nickname);
-	});
-
-	socket.on('keydown', (msg) => {
-		if(isHost){
-			io.to(myroom).emit('playKeyDown', msg);
-		}
-	});
-
-	socket.on('keyup', (msg) => {
-		if(isHost){
-			io.to(myroom).emit('playKeyUp', msg);
-		}
-	});
-
-	socket.on('mousedown', (msg) => {
-		if(isHost){
-			io.to(myroom).emit('playMouseDown', msg);
-		}
-	});
-
-	socket.on('mouseup', (msg) => {
-		if(isHost){
-			io.to(myroom).emit('playMouseUp', msg);
-		}
-	});
-
 	socket.on('chat message', (msg) => {
 		console.log(`[${socket.nickname}]在房間${[...socket.rooms][1]}傳送: ${msg}`);
 		io.to([...socket.rooms][1]).emit('chat message', msg, socket.nickname);
@@ -208,13 +276,24 @@ io.on('connection', (socket) => {
 		io.to(myroom).emit('chat message', `Host出了題目，趕快來猜吧！`, socket.nickname);
 	});
 
-	// socket.on('press au', (msg) => {
-	// 	console.log(msg);
-	// });
+	socket.on('draw', (data) => {
+		// Broadcast the drawing data to all connected clients
 
-	// socket.on('press key', (msg) => {
-	// 	console.log(msg);
-	// });
+		// io.emit('draw', data);
+		io.to(myroom).emit('draw', data);
+	});
+	socket.on('drawStop', () => {
+		// io.emit('drawStop');
+		io.to(myroom).emit('drawStop');
+	});
+	socket.on('clearCanvas', () => {
+		// io.emit('clearCanvas');
+		io.to(myroom).emit('clearCanvas');
+	});
+});
+
+app.get('/white', (req, res) => {
+	res.render('white');
 });
 
 server.listen(port, () => {

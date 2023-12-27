@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>多人繪圖遊戲</title>
+	</head>
+	<body>
+		<div id="canvasContainer">
+			<canvas id="canvas" width="800" height="600" style="border: 1px solid #000"></canvas>
+
+			<div>
+				<label for="color">顏色：</label>
+				<input type="color" id="color" value="#000000" />
+	
+				<label for="brushSize">筆刷大小：</label>
+				<input type="range" id="brushSize" min="1" max="20" value="5" />
+				<button onclick="clearCanvas()">清除畫布</button>
+			</div>
+		</div>
+
+
+		<script src="/socket.io/socket.io.js"></script>
+		<script>
+			const canvas = document.getElementById('canvas');
+			const context = canvas.getContext('2d');
+			const colorInput = document.getElementById('color');
+			const brushSizeInput = document.getElementById('brushSize');
+
+			const socket = io();
+
+			let isDrawing = false;
+
+			canvas.addEventListener('mousedown', () => {
+				isDrawing = true;
+			});
+
+			canvas.addEventListener('mouseup', () => {
+				isDrawing = false;
+				context.beginPath();
+				socket.emit('drawStop');
+			});
+
+			canvas.addEventListener('mousemove', (event) => {
+				if (!isDrawing) return;
+
+				const data = {
+					x: event.clientX,
+					y: event.clientY,
+					color: colorInput.value,
+					brushSize: brushSizeInput.value,
+					isDrawing,
+				};
+
+				draw(data);
+
+				socket.emit('draw', data);
+			});
+
+			socket.on('draw', (data) => {
+				draw(data);
+			});
+
+			socket.on('drawStop', () => {
+				context.beginPath();
+			});
+
+			socket.on('clearCanvas', () => {
+				context.clearRect(0, 0, canvas.width, canvas.height);
+			});
+
+			function draw(data) {
+				context.strokeStyle = data.color;
+				context.lineWidth = data.brushSize;
+				context.lineCap = 'round';
+
+				context.lineTo(data.x, data.y);
+				context.stroke();
+				context.beginPath();
+				context.moveTo(data.x, data.y);
+			}
+			function clearCanvas() {
+				context.clearRect(0, 0, canvas.width, canvas.height);
+				socket.emit('clearCanvas')
+			}
+		</script>
+	</body>
+</html>
